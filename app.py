@@ -15,14 +15,14 @@ cookies_cache = {}
 cookie_lock = threading.Lock()
 
 def fetch_cookies():
-    """Fetch and parse cookies from Pastebin. Returns dict."""
+    """Fetch and parse cookies from Pastebin."""
     try:
         resp = requests.get(PASTEBIN_URL, timeout=10)
         resp.raise_for_status()
-        raw = resp.text.strip()
+        raw = resp.text.strip().replace('\n', '').replace('\r', '')
         if '=' in raw:
             key, value = raw.split('=', 1)
-            app.logger.info(f"Fetched cookie: {key}={value[:10]}...")
+            app.logger.info(f"Fetched cookie: {key}={value[:20]}...")
             return {key: value}
         else:
             app.logger.warning("Cookie format unexpected: %s", raw)
@@ -50,37 +50,34 @@ def proxy(path):
     if request.query_string:
         target_url += f"?{request.query_string.decode()}"
 
-    # Forward headers (exclude 'Host' to avoid conflicts)
-    headers = {k: v for k, v in request.headers if k.lower() != 'host'}
-    # Add cookies from Pastebin
+    # Forward client headers (keep User-Agent, etc.) – just remove Host
+    forward_headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+
+    # Get the latest cookie
     with cookie_lock:
         cookies = cookies_cache.copy()
 
-    app.logger.info(f"Proxying {request.method} {target_url} with cookies {cookies}")
+    app.logger.info(f"Proxying {request.method} {target_url}")
 
     try:
-        # Forward the request
         upstream = requests.request(
             method=request.method,
             url=target_url,
-            headers=headers,
+            headers=forward_headers,
             cookies=cookies,
             data=request.get_data(),
-            allow_redirects=False,
-            timeout=20
+            allow_redirects=True,
+            timeout=20,
         )
     except requests.RequestException as e:
         app.logger.error("Upstream error: %s", e)
         return Response("Upstream request failed", status=502)
 
-    # Build response
-    response = Response(upstream.content, status=upstream.status_code)
-    # Copy headers except hop-by-hop ones
-    for k, v in upstream.headers.items():
-        if k.lower() not in ['transfer-encoding', 'content-encoding', 'content-length']:
-            response.headers[k] = v
-    return response
+    # Copy response headers except hop-by-hop ones
+    excluded = {'transfer-encoding', 'content-encoding', 'content-length', 'connection'}
+    resp_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in excluded}
+
+    return Response(upstream.content, status=upstream.status_code, headers=resp_headers)
 
 if __name__ == '__main__':
-    # For local testing; Render uses gunicorn
     app.run(host='0.0.0.0', port=5000)
